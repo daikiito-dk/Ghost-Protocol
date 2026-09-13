@@ -23,18 +23,31 @@ type Message struct {
 	Answer   string `json:"answer,omitempty"`
 	State    any    `json:"state,omitempty"`
 }
+
 type Client struct {
 	conn   *Conn
 	roomID string
 	player *room.Player
 }
+
 type Hub struct {
 	rooms   *room.Manager
 	clients map[*Client]struct{}
+	active  map[string]*Client
+	pending map[string]*time.Timer
 	mu      sync.RWMutex
 }
 
-func NewHub(rooms *room.Manager) *Hub { return &Hub{rooms: rooms, clients: make(map[*Client]struct{})} }
+const reconnectGrace = 30 * time.Second
+
+func NewHub(rooms *room.Manager) *Hub {
+	return &Hub{
+		rooms:   rooms,
+		clients: make(map[*Client]struct{}),
+		active:  make(map[string]*Client),
+		pending: make(map[string]*time.Timer),
+	}
+}
 
 func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 	conn, err := Upgrade(w, r)
@@ -127,6 +140,7 @@ func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
 func (h *Hub) join(c *Client, msg Message) error {
 	if c.player != nil {
 		return errors.New("already joined")
@@ -137,36 +151,95 @@ func (h *Hub) join(c *Client, msg Message) error {
 	if len(msg.Name) > 24 || len(msg.PlayerID) > 64 || len(msg.RoomID) > 16 {
 		return errors.New("join request too long")
 	}
+
 	r := h.rooms.GetOrCreate(msg.RoomID)
+	key := playerKey(msg.RoomID, msg.PlayerID)
+
+	h.mu.Lock()
+	if existing := h.active[key]; existing != nil {
+		h.mu.Unlock()
+		return errors.New("player is already connected")
+	}
+	if p, ok := r.Player(msg.PlayerID); ok {
+		if timer := h.pending[key]; timer != nil {
+			timer.Stop()
+			delete(h.pending, key)
+		}
+		c.roomID = msg.RoomID
+		c.player = p
+		h.clients[c] = struct{}{}
+		h.active[key] = c
+		h.mu.Unlock()
+		h.broadcastRoom(c.roomID, Message{Type: "player_reconnected", PlayerID: p.ID, Name: p.Name})
+		return nil
+	}
+	h.mu.Unlock()
+
 	p := &room.Player{ID: msg.PlayerID, Name: msg.Name}
 	if !r.AddPlayer(p) {
 		return errors.New("room is full")
 	}
+
+	h.mu.Lock()
 	c.roomID = msg.RoomID
 	c.player = p
-	h.mu.Lock()
 	h.clients[c] = struct{}{}
+	h.active[key] = c
 	h.mu.Unlock()
 	return nil
 }
+
 func (h *Hub) state(c *Client) any { return h.rooms.GetOrCreate(c.roomID).Game.State() }
+
 func trimMessage(s string) string {
 	if len(s) > 500 {
 		s = s[:500]
 	}
 	return s
 }
+
+func playerKey(roomID, playerID string) string { return roomID + "\x00" + playerID }
+
 func (h *Hub) remove(c *Client) {
+	if c.roomID == "" || c.player == nil {
+		return
+	}
+
+	key := playerKey(c.roomID, c.player.ID)
 	h.mu.Lock()
 	delete(h.clients, c)
+	if h.active[key] == c {
+		delete(h.active, key)
+	}
+	if old := h.pending[key]; old != nil {
+		old.Stop()
+	}
+	h.pending[key] = time.AfterFunc(reconnectGrace, func() {
+		h.expirePlayer(c.roomID, c.player.ID)
+	})
 	h.mu.Unlock()
-	if c.roomID != "" && c.player != nil {
-		r := h.rooms.GetOrCreate(c.roomID)
-		r.RemovePlayer(c.player.ID)
-		h.broadcastRoom(c.roomID, Message{Type: "room_state", State: r.Game.State()})
-		h.broadcastRoom(c.roomID, Message{Type: "player_left", PlayerID: c.player.ID, Name: c.player.Name})
+
+	h.broadcastRoom(c.roomID, Message{Type: "player_disconnected", PlayerID: c.player.ID, Name: c.player.Name, Message: "reconnect window: 30s"})
+}
+
+func (h *Hub) expirePlayer(roomID, playerID string) {
+	key := playerKey(roomID, playerID)
+	h.mu.Lock()
+	if _, connected := h.active[key]; connected {
+		h.mu.Unlock()
+		return
+	}
+	delete(h.pending, key)
+	h.mu.Unlock()
+
+	r := h.rooms.GetOrCreate(roomID)
+	if p, ok := r.Player(playerID); ok {
+		r.RemovePlayer(playerID)
+		h.broadcastRoom(roomID, Message{Type: "room_state", State: r.Game.State()})
+		h.broadcastRoom(roomID, Message{Type: "player_left", PlayerID: p.ID, Name: p.Name})
 	}
 }
+
 func (h *Hub) send(c *Client, msg Message) {
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -174,6 +247,7 @@ func (h *Hub) send(c *Client, msg Message) {
 	}
 	_ = c.conn.WriteText(data)
 }
+
 func (h *Hub) broadcastRoom(roomID string, msg Message) {
 	h.mu.RLock()
 	clients := make([]*Client, 0)
