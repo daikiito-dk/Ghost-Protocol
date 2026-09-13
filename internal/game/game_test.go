@@ -161,15 +161,20 @@ func TestCompleteTwoPlayerMission(t *testing.T) {
 		t.Fatalf("expected ready escape terminal: %q", msg)
 	}
 
-	code := ""
+	fragments := [3]string{}
 	for _, part := range []string{first, second} {
 		for _, field := range strings.Split(part, " | ") {
-			if strings.HasPrefix(field, "FRAGMENT ") {
-				value := strings.TrimSpace(strings.SplitN(field, ":", 2)[1])
-				code += value
+			if !strings.HasPrefix(field, "FRAGMENT ") {
+				continue
 			}
+			var index int
+			if _, err := fmt.Sscanf(field, "FRAGMENT %d:", &index); err != nil || index < 1 || index > 3 {
+				t.Fatalf("invalid fragment field %q", field)
+			}
+			fragments[index-1] = strings.TrimSpace(strings.SplitN(field, ":", 2)[1])
 		}
 	}
+	code := strings.Join(fragments[:], "")
 	if len(code) != 6 {
 		t.Fatalf("expected six-character code from three fragments, got %q", code)
 	}
