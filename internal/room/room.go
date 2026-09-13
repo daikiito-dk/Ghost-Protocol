@@ -11,28 +11,42 @@ type Room struct {
 	Game    *game.Game
 	mu      sync.RWMutex
 }
+
 type Player struct {
 	ID   string
 	Name string
 }
 
 func New(id string) *Room { return &Room{ID: id, Players: make(map[string]*Player), Game: game.New()} }
+
 func (r *Room) AddPlayer(p *Player) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.Players) >= 4 {
 		return false
 	}
+	if _, exists := r.Players[p.ID]; exists {
+		return false
+	}
 	r.Players[p.ID] = p
 	r.Game.AddPlayer(p.ID, p.Name)
 	return true
 }
+
 func (r *Room) RemovePlayer(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.Players, id)
 	r.Game.RemovePlayer(id)
 }
+
+func (r *Room) Player(id string) (*Player, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.Players[id]
+	return p, ok
+}
+
 func (r *Room) Snapshot() []*Player {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -49,7 +63,8 @@ type Manager struct {
 	mu    sync.RWMutex
 }
 
-func NewManager() *Manager { return &Manager{rooms: make(map[string]*Room)} }
+func NewManager() *Manager { return &Manager{rooms: make(map[string]*Room)}
+
 func (m *Manager) GetOrCreate(id string) *Room {
 	m.mu.Lock()
 	defer m.mu.Unlock()
