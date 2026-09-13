@@ -11,6 +11,8 @@ Real-time cooperative browser network puzzle game built with Go, WebSocket, and 
 - Server-authoritative game state
 - Cooperative chat and real-time state sync
 - Six-character escape code generated for each run
+- 30-second reconnect grace period for disconnected operatives
+- Browser session preserves player identity for recovery
 
 ## Run locally
 
@@ -31,11 +33,13 @@ Browser (HTML/CSS/JS)
         |
    Go HTTP server
         |
- Room Manager -> Game state
+   Hub -> Room Manager -> Game state
+        |
+   reconnect / session recovery
 ```
 
 The project intentionally uses the Go standard library only. The WebSocket layer is a small educational implementation for this portfolio project.
 
 ## Project status
 
-Current prototype: v0.8 — input-based puzzle verification and improved fragment recovery.
+Current prototype: v0.9 — reconnect/recovery and persistent player identity.
