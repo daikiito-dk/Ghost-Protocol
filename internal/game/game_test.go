@@ -1,6 +1,9 @@
 package game
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func startTestGame(t *testing.T, names ...string) *Game {
 	t.Helper()
@@ -115,5 +118,65 @@ func TestDisconnectPreservesRevealedFragments(t *testing.T) {
 	g.Explore("c", "NODE-17")
 	if g.State().FragmentsFound != 3 {
 		t.Fatalf("expected all fragments to remain recoverable, got %d", g.State().FragmentsFound)
+	}
+}
+
+func TestCompleteTwoPlayerMission(t *testing.T) {
+	g := startTestGame(t, "Alice", "Bob")
+
+	// The two-player setup must distribute the three fragments asymmetrically.
+	first, ok := g.Explore("a", "NODE-17")
+	if !ok || !strings.Contains(first, "FRAGMENT 1:") || !strings.Contains(first, "FRAGMENT 3:") {
+		t.Fatalf("player a should receive fragments 1 and 3, got %q", first)
+	}
+	second, ok := g.Explore("b", "NODE-17")
+	if !ok || !strings.Contains(second, "FRAGMENT 2:") {
+		t.Fatalf("player b should receive fragment 2, got %q", second)
+	}
+
+	// A player cannot unlock the core until every puzzle is verified.
+	if msg, ok := g.Explore("a", "SERVER-CORE"); !ok || !strings.Contains(msg, "ACCESS DENIED") {
+		t.Fatalf("core should remain locked before verification: %q", msg)
+	}
+
+	for _, puzzle := range []struct {
+		node   string
+		answer string
+	}{
+		{"PUZZLE-BLUE", "10"},
+		{"PUZZLE-RED", "2"},
+		{"PUZZLE-GREEN", "9"},
+	} {
+		if msg, ok := g.SolvePuzzle("a", puzzle.node, puzzle.answer); !ok || msg == "" {
+			t.Fatalf("failed to solve %s: %q", puzzle.node, msg)
+		}
+	}
+
+	state := g.State()
+	if state.FragmentsFound != 3 || state.PuzzleProgress != 3 || !state.CoreReady {
+		t.Fatalf("expected fully unlocked mission, got fragments=%d puzzles=%d core=%v", state.FragmentsFound, state.PuzzleProgress, state.CoreReady)
+	}
+
+	if msg, ok := g.Explore("a", "SERVER-CORE"); !ok || !strings.Contains(msg, "ESCAPE TERMINAL READY") {
+		t.Fatalf("expected ready escape terminal: %q", msg)
+	}
+
+	code := ""
+	for _, part := range []string{first, second} {
+		for _, field := range strings.Split(part, " | ") {
+			if strings.HasPrefix(field, "FRAGMENT ") {
+				value := strings.TrimSpace(strings.SplitN(field, ":", 2)[1])
+				code += value
+			}
+		}
+	}
+	if len(code) != 6 {
+		t.Fatalf("expected six-character code from three fragments, got %q", code)
+	}
+	if !g.SubmitCode("a", code) {
+		t.Fatalf("expected valid escape code %q to win", code)
+	}
+	if g.State().Status != Won {
+		t.Fatal("expected won status after valid escape code")
 	}
 }
